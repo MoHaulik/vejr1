@@ -1,0 +1,808 @@
+# WebXR Weather App for Meta Quest 3
+
+I'll help you create a beautiful AR weather experience that leverages the spatial capabilities of the Meta Quest 3. Let's build something that genuinely uses 3D space rather than just floating 2D panels.
+
+Here's the code for a WebXR weather app inspired by iOS but designed specifically for AR:
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WebXR Weather Experience</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <style>
+    body { margin: 0; overflow: hidden; font-family: 'SF Pro Display', -apple-system, sans-serif; }
+    #overlay { position: absolute; top: 20px; left: 20px; z-index: 1; }
+    #start-button {
+      padding: 12px 24px;
+      font-size: 18px;
+      background: rgba(0, 122, 255, 0.8);
+      color: white;
+      border: none;
+      border-radius: 30px;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+      cursor: pointer;
+    }
+    #status {
+      position: fixed;
+      bottom: 40px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.5);
+      color: white;
+      padding: 10px 20px;
+      border-radius: 20px;
+      font-size: 16px;
+      display: none;
+      z-index: 1000;
+    }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <button id="start-button">Start Weather AR</button>
+  </div>
+  <div id="status"></div>
+  
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.150.1/build/three.module.js';
+    import { TextGeometry } from 'https://unpkg.com/three@0.150.1/examples/jsm/geometries/TextGeometry.js';
+    import { FontLoader } from 'https://unpkg.com/three@0.150.1/examples/jsm/loaders/FontLoader.js';
+
+    // Main variables
+    let camera, scene, renderer;
+    let xrSession = null;
+    let controllers = [];
+    let weatherScene, font;
+    let currentWeather = "sunny"; // Default weather
+    let timeOfDay = "day"; // Default time of day
+    let temperature = 72; // Default temperature in °F
+    let weatherElements = {};
+    let particleSystems = [];
+    let lastFrameTime = 0;
+    let interactionRaycaster = new THREE.Raycaster();
+    
+    // Weather colors
+    const weatherColors = {
+      sunny: {
+        day: { top: 0x64B5F6, bottom: 0xBBDEFB },
+        night: { top: 0x1A237E, bottom: 0x303F9F }
+      },
+      cloudy: {
+        day: { top: 0x90A4AE, bottom: 0xCFD8DC },
+        night: { top: 0x263238, bottom: 0x37474F }
+      },
+      rainy: {
+        day: { top: 0x546E7A, bottom: 0x78909C },
+        night: { top: 0x263238, bottom: 0x37474F }
+      }
+    };
+
+    // Initialize
+    function init() {
+      // Scene setup
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+      
+      // Renderer setup
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      renderer.setClearColor(0x000000, 0);
+      renderer.shadowMap.enabled = true;
+      document.body.appendChild(renderer.domElement);
+      
+      // Lighting
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+      scene.add(ambientLight);
+      
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+      directionalLight.position.set(1, 1.5, 1);
+      directionalLight.castShadow = true;
+      scene.add(directionalLight);
+      
+      // Event listeners
+      window.addEventListener('resize', onWindowResize);
+      document.getElementById('start-button').addEventListener('click', startARSession);
+      
+      // Load font for text
+      const fontLoader = new FontLoader();
+      fontLoader.load('https://unpkg.com/three@0.150.1/examples/fonts/helvetiker_regular.typeface.json', 
+        (loadedFont) => {
+          font = loadedFont;
+        }
+      );
+    }
+    
+    // Start AR session
+    function startARSession() {
+      if (!navigator.xr) {
+        updateStatus('WebXR not supported in this browser');
+        return;
+      }
+      
+      navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+        if (supported) {
+          const sessionInit = { 
+            requiredFeatures: ['hit-test'],
+            optionalFeatures: ['dom-overlay', 'hand-tracking'], 
+            domOverlay: { root: document.body } 
+          };
+          
+          navigator.xr.requestSession('immersive-ar', sessionInit).then(onSessionStarted);
+        } else {
+          updateStatus('WebXR AR session not supported on this device');
+        }
+      });
+    }
+    
+    // Session start handler
+    function onSessionStarted(session) {
+      xrSession = session;
+      document.getElementById('start-button').style.display = 'none';
+      
+      renderer.xr.setReferenceSpaceType('local');
+      renderer.xr.setSession(session);
+      
+      setupControllers(session);
+      createWeatherScene();
+      
+      renderer.setAnimationLoop(render);
+      session.addEventListener('end', onSessionEnd);
+      
+      updateStatus('Weather experience started! Look around and interact with elements.');
+    }
+    
+    // End session
+    function onSessionEnd() {
+      document.getElementById('start-button').style.display = 'block';
+      document.getElementById('status').style.display = 'none';
+      
+      cleanupScene();
+      renderer.setAnimationLoop(null);
+      xrSession = null;
+    }
+    
+    // Setup controllers
+    function setupControllers(session) {
+      for (let i = 0; i < 2; i++) {
+        const controller = renderer.xr.getController(i);
+        controller.userData.id = i;
+        controller.addEventListener('selectstart', onSelectStart);
+        controller.addEventListener('selectend', onSelectEnd);
+        
+        // Visual indicator for controller
+        const controllerGeometry = new THREE.SphereGeometry(0.02, 16, 16);
+        const controllerMaterial = new THREE.MeshStandardMaterial({
+          color: i === 0 ? 0x6699FF : 0xFF6666,
+          transparent: true,
+          opacity: 0.7
+        });
+        const controllerMesh = new THREE.Mesh(controllerGeometry, controllerMaterial);
+        controller.add(controllerMesh);
+        
+        scene.add(controller);
+        controllers.push(controller);
+      }
+    }
+    
+    // Create weather scene
+    function createWeatherScene() {
+      weatherScene = new THREE.Group();
+      scene.add(weatherScene);
+      
+      // Create atmosphere dome
+      createAtmosphere();
+      
+      // Create main temperature display
+      createTemperatureDisplay();
+      
+      // Create location text
+      createLocationText();
+      
+      // Create forecast cards
+      createForecastCards();
+      
+      // Add weather effects
+      createWeatherEffects();
+      
+      // Position it all in front of the user
+      positionWeatherScene();
+    }
+    
+    // Create atmospheric dome
+    function createAtmosphere() {
+      const colors = weatherColors[currentWeather][timeOfDay];
+      
+      // Hemisphere for gradient sky
+      const skyGeometry = new THREE.SphereGeometry(6, 32, 32);
+      skyGeometry.scale(-1, 1, 1); // Invert to see from inside
+      
+      const skyMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          topColor: { value: new THREE.Color(colors.top) },
+          bottomColor: { value: new THREE.Color(colors.bottom) },
+        },
+        vertexShader: `
+          varying vec3 vWorldPosition;
+          void main() {
+            vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+            vWorldPosition = worldPosition.xyz;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 topColor;
+          uniform vec3 bottomColor;
+          varying vec3 vWorldPosition;
+          void main() {
+            float h = normalize(vWorldPosition).y;
+            float t = max(0.0, min(1.0, (h + 1.0) / 2.0));
+            gl_FragColor = vec4(mix(bottomColor, topColor, t), 1.0);
+          }
+        `,
+        side: THREE.BackSide
+      });
+      
+      const sky = new THREE.Mesh(skyGeometry, skyMaterial);
+      weatherScene.add(sky);
+      weatherElements.sky = sky;
+    }
+    
+    // Create temperature display
+    function createTemperatureDisplay() {
+      if (!font) return;
+      
+      // Large temperature text
+      const tempGeometry = new TextGeometry(`${temperature}°`, {
+        font: font,
+        size: 0.25,
+        height: 0.03,
+      });
+      tempGeometry.computeBoundingBox();
+      
+      const tempMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0xFFFFFF,
+        metalness: 0.1,
+        roughness: 0.2
+      });
+      
+      const tempMesh = new THREE.Mesh(tempGeometry, tempMaterial);
+      
+      // Center text
+      const tempBox = new THREE.Box3().setFromObject(tempMesh);
+      const tempSize = tempBox.getSize(new THREE.Vector3());
+      tempMesh.position.x = -tempSize.x / 2;
+      
+      // Add to scene
+      weatherElements.temperature = tempMesh;
+      weatherScene.add(tempMesh);
+      
+      // Add circular background
+      const tempBackGeometry = new THREE.CircleGeometry(0.3, 32);
+      const tempBackMaterial = new THREE.MeshStandardMaterial({
+        color: 0x000000,
+        transparent: true,
+        opacity: 0.3,
+        side: THREE.DoubleSide
+      });
+      
+      const tempBack = new THREE.Mesh(tempBackGeometry, tempBackMaterial);
+      tempBack.position.z = -0.02;
+      
+      weatherElements.temperatureBackground = tempBack;
+      weatherScene.add(tempBack);
+    }
+    
+    // Create location text
+    function createLocationText() {
+      if (!font) return;
+      
+      const locationGeometry = new TextGeometry("San Francisco", {
+        font: font,
+        size: 0.08,
+        height: 0.01,
+      });
+      
+      const locationMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0xFFFFFF,
+        transparent: true,
+        opacity: 0.9
+      });
+      
+      const locationMesh = new THREE.Mesh(locationGeometry, locationMaterial);
+      
+      // Center text
+      locationMesh.geometry.computeBoundingBox();
+      const locationBox = new THREE.Box3().setFromObject(locationMesh);
+      const locationSize = locationBox.getSize(new THREE.Vector3());
+      locationMesh.position.x = -locationSize.x / 2;
+      locationMesh.position.y = -0.15;
+      
+      weatherElements.location = locationMesh;
+      weatherScene.add(locationMesh);
+    }
+    
+    // Create forecast cards
+    function createForecastCards() {
+      // Create 5 forecast cards in an arc
+      const forecastData = [
+        { day: "MON", high: 75, low: 62, weather: "sunny" },
+        { day: "TUE", high: 72, low: 60, weather: "cloudy" },
+        { day: "WED", high: 68, low: 58, weather: "rainy" },
+        { day: "THU", high: 70, low: 60, weather: "cloudy" },
+        { day: "FRI", high: 73, low: 61, weather: "sunny" }
+      ];
+      
+      weatherElements.forecasts = [];
+      
+      for (let i = 0; i < forecastData.length; i++) {
+        const forecast = forecastData[i];
+        
+        // Card background
+        const cardGeometry = new THREE.PlaneGeometry(0.2, 0.3);
+        const cardMaterial = new THREE.MeshStandardMaterial({
+          color: 0xFFFFFF,
+          transparent: true,
+          opacity: 0.15,
+          side: THREE.DoubleSide
+        });
+        
+        const card = new THREE.Mesh(cardGeometry, cardMaterial);
+        
+        // Position in arc
+        const angle = (i - 2) * Math.PI / 10;
+        const radius = 0.8;
+        card.position.set(
+          Math.sin(angle) * radius,
+          -0.4,
+          -Math.cos(angle) * radius + radius
+        );
+        
+        // Rotate to face center
+        card.lookAt(0, -0.4, 0);
+        
+        // Weather icon (simple geometric shape for now)
+        let weatherIcon;
+        
+        switch (forecast.weather) {
+          case "sunny":
+            weatherIcon = new THREE.Mesh(
+              new THREE.CircleGeometry(0.03, 32),
+              new THREE.MeshBasicMaterial({ color: 0xFFEB3B })
+            );
+            break;
+          case "cloudy":
+            weatherIcon = new THREE.Group();
+            const cloudMaterial = new THREE.MeshBasicMaterial({ color: 0xECEFF1 });
+            const cloud1 = new THREE.Mesh(new THREE.SphereGeometry(0.025, 16, 16), cloudMaterial);
+            const cloud2 = new THREE.Mesh(new THREE.SphereGeometry(0.025, 16, 16), cloudMaterial);
+            cloud2.position.set(0.02, 0, 0);
+            weatherIcon.add(cloud1, cloud2);
+            break;
+          case "rainy":
+            weatherIcon = new THREE.Group();
+            const rainMaterial = new THREE.MeshBasicMaterial({ color: 0x90CAF9 });
+            const rainCloud = new THREE.Mesh(new THREE.SphereGeometry(0.025, 16, 16), 
+              new THREE.MeshBasicMaterial({ color: 0xB0BEC5 }));
+            const raindrop1 = new THREE.Mesh(
+              new THREE.ConeGeometry(0.008, 0.025, 8), rainMaterial);
+            const raindrop2 = new THREE.Mesh(
+              new THREE.ConeGeometry(0.008, 0.025, 8), rainMaterial);
+            
+            raindrop1.position.set(-0.015, -0.03, 0);
+            raindrop2.position.set(0.015, -0.03, 0);
+            raindrop1.rotation.x = Math.PI;
+            raindrop2.rotation.x = Math.PI;
+            
+            weatherIcon.add(rainCloud, raindrop1, raindrop2);
+            break;
+        }
+        
+        weatherIcon.position.y = 0.06;
+        card.add(weatherIcon);
+        
+        weatherElements.forecasts.push(card);
+        weatherScene.add(card);
+      }
+    }
+    
+    // Create weather effects
+    function createWeatherEffects() {
+      // Add particles based on current weather
+      if (currentWeather === "rainy") {
+        createRainEffect();
+      } else if (currentWeather === "cloudy") {
+        createCloudEffect();
+      } else if (currentWeather === "sunny") {
+        createSunEffect();
+      }
+    }
+    
+    // Create rain effect
+    function createRainEffect() {
+      const rainCount = 200;
+      const rainGeometry = new THREE.BufferGeometry();
+      const rainPositions = new Float32Array(rainCount * 3);
+      const rainVelocities = new Float32Array(rainCount);
+      
+      for (let i = 0; i < rainCount; i++) {
+        const i3 = i * 3;
+        rainPositions[i3] = (Math.random() - 0.5) * 2;
+        rainPositions[i3 + 1] = Math.random() * 2;
+        rainPositions[i3 + 2] = (Math.random() - 0.5) * 2;
+        
+        rainVelocities[i] = 0.05 + Math.random() * 0.05;
+      }
+      
+      rainGeometry.setAttribute('position', new THREE.BufferAttribute(rainPositions, 3));
+      
+      const rainMaterial = new THREE.PointsMaterial({
+        color: 0xAAAAAA,
+        size: 0.01,
+        transparent: true,
+        opacity: 0.6
+      });
+      
+      const rain = new THREE.Points(rainGeometry, rainMaterial);
+      rain.userData = { 
+        velocities: rainVelocities,
+        type: "rain"
+      };
+      
+      particleSystems.push(rain);
+      weatherScene.add(rain);
+    }
+    
+    // Create cloud effect
+    function createCloudEffect() {
+      const cloudCount = 10;
+      
+      for (let i = 0; i < cloudCount; i++) {
+        const cloudGroup = new THREE.Group();
+        
+        // Create cloud with multiple spheres
+        const cloudParts = Math.floor(3 + Math.random() * 4);
+        const cloudMaterial = new THREE.MeshStandardMaterial({
+          color: 0xFFFFFF,
+          transparent: true,
+          opacity: 0.4 + Math.random() * 0.4
+        });
+        
+        for (let j = 0; j < cloudParts; j++) {
+          const size = 0.1 + Math.random() * 0.15;
+          const cloudSphere = new THREE.Mesh(
+            new THREE.SphereGeometry(size, 8, 8),
+            cloudMaterial
+          );
+          
+          cloudSphere.position.x = (j - cloudParts/2) * 0.1;
+          cloudSphere.position.y = Math.random() * 0.05;
+          cloudSphere.position.z = Math.random() * 0.05;
+          
+          cloudGroup.add(cloudSphere);
+        }
+        
+        // Position cloud randomly in sky
+        cloudGroup.position.set(
+          (Math.random() - 0.5) * 3,
+          1 + Math.random() * 1.5,
+          (Math.random() - 0.5) * 3
+        );
+        
+        // Add motion data
+        cloudGroup.userData = {
+          speed: 0.001 + Math.random() * 0.002,
+          direction: new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize(),
+          type: "cloud"
+        };
+        
+        particleSystems.push(cloudGroup);
+        weatherScene.add(cloudGroup);
+      }
+    }
+    
+    // Create sun effect
+    function createSunEffect() {
+      // Sun glow
+      const sunGeometry = new THREE.SphereGeometry(0.2, 32, 32);
+      const sunMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          glowColor: { value: new THREE.Color(0xFFEB3B) },
+          p: { value: 4.0 },
+          viewVector: { value: new THREE.Vector3() }
+        },
+        vertexShader: `
+          uniform vec3 viewVector;
+          varying vec3 vNormal;
+          varying vec3 vViewPosition;
+          void main() {
+            vNormal = normalize(normalMatrix * normal);
+            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+            vViewPosition = -mvPosition.xyz;
+            gl_Position = projectionMatrix * mvPosition;
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 glowColor;
+          uniform float p;
+          varying vec3 vNormal;
+          varying vec3 vViewPosition;
+          void main() {
+            vec3 normal = normalize(vNormal);
+            vec3 viewDir = normalize(vViewPosition);
+            float intensity = pow(1.0 - dot(normal, viewDir), p);
+            gl_FragColor = vec4(glowColor, intensity * 0.6);
+          }
+        `,
+        transparent: true,
+        side: THREE.BackSide
+      });
+      
+      const sun = new THREE.Mesh(sunGeometry, sunMaterial);
+      sun.position.set(1.5, 1.5, -1.5);
+      
+      weatherElements.sun = sun;
+      weatherScene.add(sun);
+      
+      // Sun rays
+      const rayCount = 8;
+      for (let i = 0; i < rayCount; i++) {
+        const angle = (i / rayCount) * Math.PI * 2;
+        
+        const rayGeometry = new THREE.PlaneGeometry(0.4, 0.03);
+        const rayMaterial = new THREE.MeshBasicMaterial({
+          color: 0xFFEB3B,
+          transparent: true,
+          opacity: 0.7,
+          side: THREE.DoubleSide
+        });
+        
+        const ray = new THREE.Mesh(rayGeometry, rayMaterial);
+        ray.position.copy(sun.position);
+        ray.rotation.z = angle;
+        
+        ray.userData = {
+          initialRotation: angle,
+          type: "sunRay"
+        };
+        
+        particleSystems.push(ray);
+        weatherScene.add(ray);
+      }
+    }
+    
+    // Position the weather scene
+    function positionWeatherScene() {
+      // Position in front of the user
+      weatherScene.position.z = -1.2;
+      weatherScene.position.y = 0.2;
+    }
+    
+    // Update weather effects
+    function updateWeatherEffects(deltaTime) {
+      for (const particle of particleSystems) {
+        if (particle.userData.type === "rain") {
+          const positions = particle.geometry.attributes.position.array;
+          const velocities = particle.userData.velocities;
+          
+          for (let i = 0; i < positions.length / 3; i++) {
+            const i3 = i * 3;
+            
+            // Update y position with velocity
+            positions[i3 + 1] -= velocities[i] * deltaTime * 60;
+            
+            // Reset if below ground
+            if (positions[i3 + 1] < -1) {
+              positions[i3] = (Math.random() - 0.5) * 2;
+              positions[i3 + 1] = 2;
+              positions[i3 + 2] = (Math.random() - 0.5) * 2;
+            }
+          }
+          
+          particle.geometry.attributes.position.needsUpdate = true;
+        } 
+        else if (particle.userData.type === "cloud") {
+          particle.position.x += particle.userData.direction.x * particle.userData.speed * deltaTime * 60;
+          particle.position.z += particle.userData.direction.z * particle.userData.speed * deltaTime * 60;
+          
+          // Wrap around if out of bounds
+          if (particle.position.x > 3) particle.position.x = -3;
+          if (particle.position.x < -3) particle.position.x = 3;
+          if (particle.position.z > 3) particle.position.z = -3;
+          if (particle.position.z < -3) particle.position.z = 3;
+        }
+        else if (particle.userData.type === "sunRay") {
+          // Rotate sun rays
+          particle.rotation.z = particle.userData.initialRotation + (Date.now() % 10000) / 10000 * Math.PI * 2;
+        }
+      }
+    }
+    
+    // Interaction handlers
+    function onSelectStart(event) {
+      const controller = event.target;
+      const controllerPos = new THREE.Vector3();
+      controller.getWorldPosition(controllerPos);
+      
+      const tempPosition = new THREE.Vector3();
+      const tempDirection = new THREE.Vector3();
+      
+      controller.getWorldPosition(tempPosition);
+      controller.getWorldDirection(tempDirection);
+      tempDirection.multiplyScalar(-1); // Invert direction as controllers point backwards
+      
+      interactionRaycaster.set(tempPosition, tempDirection);
+      
+      // Check intersection with weather elements
+      const intersects = interactionRaycaster.intersectObjects(weatherScene.children, true);
+      
+      if (intersects.length > 0) {
+        const object = intersects[0].object;
+        
+        // Check what was clicked and respond
+        if (object === weatherElements.temperatureBackground) {
+          // Toggle temperature unit
+          toggleTemperatureUnit();
+        }
+        else if (weatherElements.forecasts.includes(object) || 
+                 weatherElements.forecasts.some(card => card.children.includes(object))) {
+          // Change current weather based on selected forecast
+          const index = weatherElements.forecasts.findIndex(
+            card => card === object || card.children.includes(object)
+          );
+          if (index >= 0) {
+            const forecastData = [
+              "sunny", "cloudy", "rainy", "cloudy", "sunny"
+            ];
+            changeWeather(forecastData[index]);
+          }
+        }
+      }
+    }
+    
+    function onSelectEnd(event) {
+      // Nothing needed here for now
+    }
+    
+    // Toggle temperature unit
+    function toggleTemperatureUnit() {
+      if (weatherElements.temperature) {
+        // Convert between F and C
+        if (weatherElements.temperature.userData.unit === "F") {
+          temperature = Math.round((temperature - 32) * 5 / 9);
+          weatherElements.temperature.userData.unit = "C";
+        } else {
+          temperature = Math.round(temperature * 9 / 5 + 32);
+          weatherElements.temperature.userData.unit = "F";
+        }
+        
+        // Update temperature display
+        updateTemperatureDisplay();
+      }
+    }
+    
+    // Change weather type
+    function changeWeather(newWeather) {
+      // Skip if same weather
+      if (newWeather === currentWeather) return;
+      
+      currentWeather = newWeather;
+      
+      // Clear existing weather effects
+      for (const particle of particleSystems) {
+        weatherScene.remove(particle);
+      }
+      particleSystems = [];
+      
+      // Update atmosphere
+      updateAtmosphere();
+      
+      // Create new weather effects
+      createWeatherEffects();
+      
+      updateStatus(`Weather changed to ${currentWeather}`);
+    }
+    
+    // Update atmosphere colors
+    function updateAtmosphere() {
+      if (weatherElements.sky) {
+        const colors = weatherColors[currentWeather][timeOfDay];
+        weatherElements.sky.material.uniforms.topColor.value = new THREE.Color(colors.top);
+        weatherElements.sky.material.uniforms.bottomColor.value = new THREE.Color(colors.bottom);
+      }
+    }
+    
+    // Update temperature display
+    function updateTemperatureDisplay() {
+      if (!weatherElements.temperature || !font) return;
+      
+      // Remove old temperature mesh
+      weatherScene.remove(weatherElements.temperature);
+      
+      // Create new temperature text
+      const unit = weatherElements.temperature.userData.unit || "F";
+      const tempGeometry = new TextGeometry(`${temperature}°${unit}`, {
+        font: font,
+        size: 0.25,
+        height: 0.03,
+      });
+      
+      const tempMaterial = new THREE.MeshStandardMaterial({ 
+        color: 0xFFFFFF,
+        metalness: 0.1,
+        roughness: 0.2
+      });
+      
+      const tempMesh = new THREE.Mesh(tempGeometry, tempMaterial);
+      tempMesh.userData.unit = unit;
+      
+      // Center text
+      tempGeometry.computeBoundingBox();
+      const tempBox = new THREE.Box3().setFromObject(tempMesh);
+      const tempSize = tempBox.getSize(new THREE.Vector3());
+      tempMesh.position.x = -tempSize.x / 2;
+      
+      // Add to scene
+      weatherElements.temperature = tempMesh;
+      weatherScene.add(tempMesh);
+    }
+    
+    // Clean up scene
+    function cleanupScene() {
+      while(scene.children.length > 0) { 
+        const object = scene.children[0];
+        if (object.geometry) object.geometry.dispose();
+        if (object.material) object.material.dispose();
+        scene.remove(object); 
+      }
+      
+      weatherScene = null;
+      weatherElements = {};
+      particleSystems = [];
+    }
+    
+    // Render loop
+    function render(timestamp, frame) {
+      // Calculate delta time for animations
+      const deltaTime = (timestamp - lastFrameTime) / 1000;
+      lastFrameTime = timestamp;
+      
+      // Update weather effects
+      if (weatherScene) {
+        updateWeatherEffects(deltaTime);
+      }
+      
+      renderer.render(scene, camera);
+    }
+    
+    // Window resize handler
+    function onWindowResize() {
+      if (camera) {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+      }
+      if (renderer) {
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+    }
+    
+    // Update status message
+    function updateStatus(message) {
+      const statusElement = document.getElementById('status');
+      statusElement.textContent = message;
+      statusElement.style.display = 'block';
+      
+      setTimeout(() => {
+        statusElement.style.display = 'none';
+      }, 3000);
+    }
+    
+    // Initialize everything
+    document.addEventListener('DOMContentLoaded', init);
+  </script>
+</body>
+</html>
